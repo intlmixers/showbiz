@@ -424,7 +424,7 @@ if (saveBtn) {
             return;
           }
           const link = document.createElement("a");
-          link.download = "mi-album.png";
+          link.download = "my-showbiz.png";
           link.href = URL.createObjectURL(blob);
           link.click();
           URL.revokeObjectURL(link.href);
