@@ -8,10 +8,15 @@ if (stickerBar) {
   originalStickers = [...stickerBar.querySelectorAll("img")].map(
     (img) => img.src
   );
+  // Guardamos el lugar original de cada sticker en la barra
+  stickerBar.querySelectorAll("img").forEach((img, i) => {
+    img.dataset.index = i;
+  });
 }
 
 let attachedSticker = null;
 let selectedSticker = null;
+let zCounter = 10; // el sticker seleccionado pasa al frente
 
 // Deseleccionar al hacer click afuera (se registra una sola vez)
 document.addEventListener("click", () => {
@@ -21,14 +26,63 @@ document.addEventListener("click", () => {
   }
 });
 
-function createStickerWrapper(src, x, y) {
+const HANDLES = ".resize-handle, .rotate-handle, .delete-handle";
+
+// ¿El punto (x, y) de la pantalla cae sobre una parte visible (no transparente)
+// del sticker? Tiene en cuenta el tamaño y la rotación actuales.
+function isOpaqueAt(wrapper, img, rotation, clientX, clientY) {
+  if (!img.naturalWidth || !img.offsetWidth) return true;
+  try {
+    if (!img._hitCtx) {
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      img._hitCtx = ctx;
+    }
+    const r = wrapper.getBoundingClientRect();
+    const dx = clientX - (r.left + r.width / 2);
+    const dy = clientY - (r.top + r.height / 2);
+    const a = (-rotation * Math.PI) / 180;
+    const x = dx * Math.cos(a) - dy * Math.sin(a);
+    const y = dx * Math.sin(a) + dy * Math.cos(a);
+    const w = img.offsetWidth;
+    const h = img.offsetHeight;
+    const u = Math.floor(((x + w / 2) / w) * img.naturalWidth);
+    const v = Math.floor(((y + h / 2) / h) * img.naturalHeight);
+    if (u < 0 || v < 0 || u >= img.naturalWidth || v >= img.naturalHeight) {
+      return false;
+    }
+    return img._hitCtx.getImageData(u, v, 1, 1).data[3] > 20;
+  } catch (err) {
+    return true; // si el navegador no deja leer la imagen, la tratamos como sólida
+  }
+}
+
+// Devuelve el sticker de más arriba que tenga una parte visible bajo el cursor
+function pickSticker(x, y) {
+  const seen = new Set();
+  for (const el of document.elementsFromPoint(x, y)) {
+    const w = el.closest(".sticker-wrapper");
+    if (!w || seen.has(w)) continue;
+    seen.add(w);
+    if (w._isOpaqueAt && w._isOpaqueAt(x, y)) return w;
+  }
+  return null;
+}
+
+function createStickerWrapper(src, x, y, index) {
   const wrapper = document.createElement("div");
   wrapper.classList.add("sticker-wrapper");
+  if (index !== undefined) wrapper.dataset.index = index;
+  wrapper.style.zIndex = ++zCounter;
   wrapper.style.left = x + "px";
   wrapper.style.top = y + "px";
 
   const img = document.createElement("img");
   img.classList.add("sticker");
+  img.draggable = false; // evita el arrastre nativo del navegador
   wrapper.appendChild(img);
 
   const resizeHandle = document.createElement("div");
@@ -50,6 +104,7 @@ function createStickerWrapper(src, x, y) {
   let rotation = 0;
   const minWidth = 50;
   const maxWidth = 300;
+  wrapper._isOpaqueAt = (x, y) => isOpaqueAt(wrapper, img, rotation, x, y);
 
   // Esperar a que cargue la imagen para conocer sus medidas
   img.onload = () => {
@@ -60,21 +115,58 @@ function createStickerWrapper(src, x, y) {
   };
   img.src = src;
 
-  // Selección
+  // Selección: sólo cuenta la parte visible del sticker. Si haces click sobre
+  // una zona transparente, el click pasa al sticker que está debajo.
   wrapper.addEventListener("click", (e) => {
+    if (e.target.closest(HANDLES)) {
+      e.stopPropagation();
+      return;
+    }
+    const target = pickSticker(e.clientX, e.clientY);
+    if (target !== wrapper) {
+      if (target) {
+        e.stopPropagation();
+        target.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            clientX: e.clientX,
+            clientY: e.clientY,
+          })
+        );
+      }
+      return; // sin sticker debajo: el click sigue y deselecciona
+    }
     e.stopPropagation();
     if (selectedSticker && selectedSticker !== wrapper) {
       selectedSticker.classList.remove("selected");
     }
     selectedSticker = wrapper;
     wrapper.classList.add("selected");
+    wrapper.style.zIndex = ++zCounter; // al frente de los demás
   });
 
   // Mover
   wrapper.addEventListener("mousedown", (e) => {
-    if (e.target.closest(".resize-handle, .rotate-handle, .delete-handle"))
+    if (e.target.closest(HANDLES)) return;
+    const target = pickSticker(e.clientX, e.clientY);
+    if (target !== wrapper) {
+      if (target) {
+        e.stopPropagation();
+        target.dispatchEvent(
+          new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            button: 0,
+          })
+        );
+      }
       return;
+    }
     e.preventDefault();
+    wrapper.style.zIndex = ++zCounter; // al frente mientras lo arrastras
     const rect = albumContainer.getBoundingClientRect();
     const shiftX = e.clientX - rect.left - wrapper.offsetLeft;
     const shiftY = e.clientY - rect.top - wrapper.offsetTop;
@@ -181,7 +273,8 @@ function stickerEventsCreator(sticker) {
         createStickerWrapper(
           attachedSticker.dataset.src,
           ev.clientX - rect.left - attachedSticker.width / 2,
-          ev.clientY - rect.top - attachedSticker.height / 2
+          ev.clientY - rect.top - attachedSticker.height / 2,
+          sticker.dataset.index
         );
         sticker.remove();
       }
@@ -191,13 +284,91 @@ function stickerEventsCreator(sticker) {
   });
 }
 
-function removeSticker(sticker) {
-  const img = document.createElement("img");
-  img.src = sticker.querySelector("img").src;
+// Inserta el sticker en la barra respetando su orden original
+function insertInBar(img) {
+  const idx = Number(img.dataset.index);
+  if (!Number.isNaN(idx)) {
+    const next = [...stickerBar.querySelectorAll("img")].find(
+      (el) => Number(el.dataset.index) > idx
+    );
+    if (next) {
+      stickerBar.insertBefore(img, next);
+      return;
+    }
+  }
   stickerBar.appendChild(img);
-  stickerEventsCreator(img);
+}
 
-  sticker.remove();
+// El sticker "vuela" de vuelta a su lugar en la barra
+function removeSticker(wrapper) {
+  const wrapperImg = wrapper.querySelector("img");
+  const src = wrapperImg.src;
+
+  // Posición y tamaño actuales (el centro no cambia con la rotación)
+  const r = wrapper.getBoundingClientRect();
+  const startW = wrapperImg.offsetWidth;
+  const startH = wrapperImg.offsetHeight;
+  const startLeft = r.left + r.width / 2 - startW / 2;
+  const startTop = r.top + r.height / 2 - startH / 2;
+  const startTransform = wrapper.style.transform || "rotate(0deg)";
+
+  // Lo devolvemos a la barra, invisible hasta que termine el vuelo
+  const barImg = document.createElement("img");
+  barImg.src = src;
+  if (wrapper.dataset.index !== undefined) {
+    barImg.dataset.index = wrapper.dataset.index;
+  }
+  barImg.style.visibility = "hidden";
+  insertInBar(barImg);
+  stickerEventsCreator(barImg);
+
+  wrapper.remove();
+
+  function fly() {
+    const t = barImg.getBoundingClientRect();
+    const clone = document.createElement("img");
+    clone.src = src;
+    Object.assign(clone.style, {
+      position: "fixed",
+      left: startLeft + "px",
+      top: startTop + "px",
+      width: startW + "px",
+      height: startH + "px",
+      transform: startTransform,
+      pointerEvents: "none",
+      zIndex: "99999",
+    });
+    document.body.appendChild(clone);
+
+    const anim = clone.animate(
+      [
+        {
+          left: startLeft + "px",
+          top: startTop + "px",
+          width: startW + "px",
+          height: startH + "px",
+          transform: startTransform,
+        },
+        {
+          left: t.left + "px",
+          top: t.top + "px",
+          width: t.width + "px",
+          height: t.height + "px",
+          transform: "rotate(0deg)",
+        },
+      ],
+      { duration: 550, easing: "cubic-bezier(0.4, 0, 0.2, 1)" }
+    );
+    const done = () => {
+      clone.remove();
+      barImg.style.visibility = "";
+    };
+    anim.onfinish = done;
+    anim.oncancel = done;
+  }
+
+  if (barImg.complete && barImg.naturalWidth) fly();
+  else barImg.onload = fly;
 }
 
 // Stickers "attached" al cursor
@@ -215,9 +386,10 @@ if (resetBtn) {
     selectedSticker = null;
 
     stickerBar.innerHTML = "";
-    originalStickers.forEach((src) => {
+    originalStickers.forEach((src, i) => {
       const img = document.createElement("img");
       img.src = src;
+      img.dataset.index = i;
       stickerBar.appendChild(img);
       stickerEventsCreator(img);
     });
